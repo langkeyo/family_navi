@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_map_flutter/tencent_map_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
+
+const String kApiBaseUrl = 'https://api.julijialuo.top';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,13 +34,179 @@ class FamilyNaviApp extends StatelessWidget {
         useMaterial3: true,
         textTheme: textTheme,
       ),
-      home: const FamilyTencentMapPage(),
+      home: const AppRoot(),
+    );
+  }
+}
+
+class AppRoot extends StatefulWidget {
+  const AppRoot({super.key});
+
+  @override
+  State<AppRoot> createState() => _AppRootState();
+}
+
+class _AppRootState extends State<AppRoot> {
+  String? _token;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadToken();
+  }
+
+  Future<void> _loadToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token');
+    setState(() {
+      _token = token;
+      _loading = false;
+    });
+  }
+
+  Future<void> _setToken(String? token) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (token == null) {
+      await prefs.remove('auth_token');
+    } else {
+      await prefs.setString('auth_token', token);
+    }
+    setState(() => _token = token);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    if (_token == null) {
+      return LoginPage(
+        onLoggedIn: (token) => _setToken(token),
+      );
+    }
+    return FamilyTencentMapPage(
+      token: _token!,
+      onLogout: () => _setToken(null),
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  final void Function(String token) onLoggedIn;
+
+  const LoginPage({super.key, required this.onLoggedIn});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _userCtrl = TextEditingController();
+  final _passCtrl = TextEditingController();
+  bool _loading = false;
+
+  Future<void> _login() async {
+    setState(() => _loading = true);
+    try {
+      final token = await ApiClient(baseUrl: kApiBaseUrl).login(
+        _userCtrl.text.trim(),
+        _passCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      widget.onLoggedIn(token);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('登录失败：$e')),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _register() async {
+    setState(() => _loading = true);
+    try {
+      await ApiClient(baseUrl: kApiBaseUrl).register(
+        _userCtrl.text.trim(),
+        _passCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('注册成功，请登录')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('注册失败：$e')),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 360),
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '家人拜年导航',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: _userCtrl,
+                  decoration: const InputDecoration(labelText: '用户名'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _passCtrl,
+                  decoration: const InputDecoration(labelText: '密码'),
+                  obscureText: true,
+                ),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: _loading ? null : _login,
+                  child: _loading
+                      ? const SizedBox(
+                          height: 18,
+                          width: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('登录'),
+                ),
+                TextButton(
+                  onPressed: _loading ? null : _register,
+                  child: const Text('注册新账号'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
 
 class FamilyTencentMapPage extends StatefulWidget {
-  const FamilyTencentMapPage({super.key});
+  final String token;
+  final VoidCallback onLogout;
+
+  const FamilyTencentMapPage({
+    super.key,
+    required this.token,
+    required this.onLogout,
+  });
 
   @override
   State<FamilyTencentMapPage> createState() => _FamilyTencentMapPageState();
@@ -56,10 +227,12 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
   DateTime? _lastTime;
 
   final Distance _distance = const Distance();
+  late final ApiClient _api;
 
   @override
   void initState() {
     super.initState();
+    _api = ApiClient(baseUrl: kApiBaseUrl, token: widget.token);
     _initDefaultStations();
     _mapWidget = TencentMap(
       myLocationEnabled: true,
@@ -72,8 +245,33 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         setState(() => _uiReady = true);
+        _loadRemoteMarkers();
       }
     });
+  }
+
+  Future<void> _loadRemoteMarkers() async {
+    try {
+      final items = await _api.listMarkers();
+      for (final m in items) {
+        final id = 'remote_${m.id}';
+        final s = _Station(
+          id: id,
+          title: m.title,
+          tip: m.note.isEmpty ? '这是你保存的站点' : m.note,
+          position: LatLng(m.lat, m.lng),
+          isCustom: true,
+          remoteId: m.id,
+        );
+        _addStation(s);
+      }
+      setState(() {});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('加载云端标记失败：$e')),
+      );
+    }
   }
 
   void _initDefaultStations() {
@@ -198,18 +396,35 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
     final name = await _promptForName();
     if (name == null || name.trim().isEmpty) return;
 
-    final id = 'custom_${_idSeed++}';
-    final s = _Station(
-      id: id,
-      title: name.trim(),
-      tip: '这是手动添加的站点',
-      position: pos,
-      isCustom: true,
-    );
-    setState(() {
-      _addStation(s);
-    });
-    _showStationInfo(s);
+    await _createMarkerAtPos(pos, name.trim());
+  }
+
+  Future<void> _createMarkerAtPos(LatLng pos, String title) async {
+    try {
+      final created = await _api.createMarker(
+        title: title,
+        note: '这是手动添加的站点',
+        lat: pos.latitude,
+        lng: pos.longitude,
+      );
+      final s = _Station(
+        id: 'remote_${created.id}',
+        title: created.title,
+        tip: created.note.isEmpty ? '这是你保存的站点' : created.note,
+        position: LatLng(created.lat, created.lng),
+        isCustom: true,
+        remoteId: created.id,
+      );
+      setState(() {
+        _addStation(s);
+      });
+      _showStationInfo(s);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('保存标记失败：$e')),
+      );
+    }
   }
 
   // 使用当前定位点快速新增站点
@@ -223,18 +438,7 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
     }
     final name = await _promptForName();
     if (name == null || name.trim().isEmpty) return;
-    final id = 'custom_${_idSeed++}';
-    final s = _Station(
-      id: id,
-      title: name.trim(),
-      tip: '这是手动添加的站点',
-      position: _filtered!,
-      isCustom: true,
-    );
-    setState(() {
-      _addStation(s);
-    });
-    _showStationInfo(s);
+    await _createMarkerAtPos(_filtered!, name.trim());
   }
 
   _Station? _findNearestStation(LatLng pos, double meters) {
@@ -303,12 +507,7 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
                 const SizedBox(width: 12),
                 if (s.isCustom)
                   TextButton(
-                    onPressed: () {
-                      _controller?.removeMarker(s.id);
-                      _stations.remove(s.id);
-                      Navigator.pop(ctx);
-                      setState(() {});
-                    },
+                    onPressed: () => _deleteStation(s),
                     child: const Text('删除此站点'),
                   ),
               ],
@@ -317,6 +516,24 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _deleteStation(_Station s) async {
+    if (s.remoteId != null) {
+      try {
+        await _api.deleteMarker(s.remoteId!);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('删除失败：$e')),
+        );
+        return;
+      }
+    }
+    _controller?.removeMarker(s.id);
+    _stations.remove(s.id);
+    if (mounted) setState(() {});
+    Navigator.pop(context);
   }
 
   // 调起腾讯地图 App 步行导航
@@ -425,6 +642,16 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
                               _StationChip(title: '点地图可新增站点'),
                             ],
                           ),
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: widget.onLogout,
+                                icon: const Icon(Icons.logout, size: 18),
+                                label: const Text('退出登录'),
+                              ),
+                            ],
+                          ),
                         ],
                       ),
                     ),
@@ -437,7 +664,7 @@ class _FamilyTencentMapPageState extends State<FamilyTencentMapPage> {
           Positioned(
             left: 12,
             right: 12,
-            top: MediaQuery.of(context).padding.top + 140,
+            top: MediaQuery.of(context).padding.top + 160,
             child: AnimatedOpacity(
               duration: const Duration(milliseconds: 400),
               opacity: _uiReady ? 1 : 0,
@@ -501,6 +728,7 @@ class _Station {
   final LatLng position;
   final Bitmap? icon;
   final bool isCustom;
+  final int? remoteId;
 
   _Station({
     required this.id,
@@ -509,6 +737,7 @@ class _Station {
     required this.position,
     this.icon,
     this.isCustom = false,
+    this.remoteId,
   });
 }
 
@@ -530,6 +759,116 @@ class _StationChip extends StatelessWidget {
         title,
         style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
+    );
+  }
+}
+
+class ApiClient {
+  final String baseUrl;
+  final String? token;
+
+  ApiClient({required this.baseUrl, this.token});
+
+  Map<String, String> _headers() {
+    final headers = {'Content-Type': 'application/json'};
+    if (token != null) {
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
+
+  Future<String> login(String username, String password) async {
+    final resp = await http.post(
+      Uri.parse('$baseUrl/auth/login'),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'username=$username&password=$password',
+    );
+    if (resp.statusCode != 200) {
+      throw Exception('登录失败(${resp.statusCode})');
+    }
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    return data['access_token'] as String;
+  }
+
+  Future<void> register(String username, String password) async {
+    final resp = await http.post(
+      Uri.parse('$baseUrl/auth/register'),
+      headers: _headers(),
+      body: jsonEncode({'username': username, 'password': password}),
+    );
+    if (resp.statusCode != 200) {
+      throw Exception('注册失败(${resp.statusCode})');
+    }
+  }
+
+  Future<List<MarkerDto>> listMarkers() async {
+    final resp = await http.get(
+      Uri.parse('$baseUrl/markers'),
+      headers: _headers(),
+    );
+    if (resp.statusCode != 200) {
+      throw Exception('拉取失败(${resp.statusCode})');
+    }
+    final list = jsonDecode(resp.body) as List<dynamic>;
+    return list.map((e) => MarkerDto.fromJson(e)).toList();
+  }
+
+  Future<MarkerDto> createMarker({
+    required String title,
+    required String note,
+    required double lat,
+    required double lng,
+  }) async {
+    final resp = await http.post(
+      Uri.parse('$baseUrl/markers'),
+      headers: _headers(),
+      body: jsonEncode({
+        'title': title,
+        'note': note,
+        'lat': lat,
+        'lng': lng,
+        'visible': true,
+      }),
+    );
+    if (resp.statusCode != 200) {
+      throw Exception('创建失败(${resp.statusCode})');
+    }
+    return MarkerDto.fromJson(jsonDecode(resp.body));
+  }
+
+  Future<void> deleteMarker(int id) async {
+    final resp = await http.delete(
+      Uri.parse('$baseUrl/markers/$id'),
+      headers: _headers(),
+    );
+    if (resp.statusCode != 200) {
+      throw Exception('删除失败(${resp.statusCode})');
+    }
+  }
+}
+
+class MarkerDto {
+  final int id;
+  final String title;
+  final String note;
+  final double lat;
+  final double lng;
+
+  MarkerDto({
+    required this.id,
+    required this.title,
+    required this.note,
+    required this.lat,
+    required this.lng,
+  });
+
+  factory MarkerDto.fromJson(Map<String, dynamic> json) {
+    return MarkerDto(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      note: (json['note'] as String?) ?? '',
+      lat: (json['lat'] as num).toDouble(),
+      lng: (json['lng'] as num).toDouble(),
     );
   }
 }

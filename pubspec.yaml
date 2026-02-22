@@ -38,6 +38,8 @@ dependencies:
   url_launcher: ^6.3.0
   latlong2: ^0.9.1
   google_fonts: ^6.2.1
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
 
 dev_dependencies:
   flutter_test:
