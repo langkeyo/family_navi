@@ -53,3 +53,8 @@ class MarkerOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class MarkerShareCreate(BaseModel):
+    username: str
+    can_edit: bool = False
